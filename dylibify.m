@@ -5,6 +5,7 @@
 //  Created by Jake James on 7/13/18.
 //  Copyright © 2018 Jake James. All rights reserved.
 //
+// clang -o dylibify dylibify.m -framework Foundation -fobjc-arc
 
 #import <Foundation/Foundation.h>
 
@@ -14,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #define SWAP32(p) __builtin_bswap32(p)
 
@@ -59,6 +61,23 @@ void patch_mach_header(FILE *obj_file, off_t offset, void *mh, BOOL is64bit) {
     }
 }
 
+void patch_buildver(FILE *obj_file, off_t offset, struct build_version_command *buildver) {
+    printf("[*] Patching buildver\n");
+    printf("[-] PLATFORM was 0x%x\n", buildver->platform);
+    printf("[-] MINOS was: 0x%x\n", buildver->minos);
+    printf("[-] SDK was: 0x%x\n", buildver->sdk);
+
+    buildver->platform = PLATFORM_MACOS;
+    buildver->minos = 0x000b0000;
+    buildver->sdk = 0x000b0000;
+    
+    printf("[-] PLATFORM is 0x%x\n", buildver->platform);
+    printf("[-] MINOS is: 0x%x\n", buildver->minos);
+    printf("[-] SDK is: 0x%x\n", buildver->sdk);
+    
+    write_bytes(obj_file, offset, sizeof(struct build_version_command), buildver);
+}
+
 void patch_pagezero(FILE *obj_file, off_t offset, struct load_command *cmd, BOOL copied, void *seg, size_t sizeofseg, const char *target) {
     
     uint32_t size = cmd->cmdsize;
@@ -72,7 +91,7 @@ void patch_pagezero(FILE *obj_file, off_t offset, struct load_command *cmd, BOOL
     //----Allocate data for our new command + @executable_path/NAME_OF_TARGET.dylib----//
     //----So, if you plan to link with it, don't rename the file and put it on same location as binary----//
     //----Obviously, you can easily patch that yourself, if for some reason you want to----//
-    struct dylib_command *dylib_cmd = (struct dylib_command*)malloc(sizeof(struct dylib_command) + [@(target) lastPathComponent].length + 18);
+    struct dylib_command *dylib_cmd = (struct dylib_command*)malloc(sizeof(struct dylib_command) + [@(target) lastPathComponent].length + 52);
     
     dylib_cmd->cmd = LC_ID_DYLIB;
     dylib_cmd->cmdsize = size;
@@ -84,7 +103,7 @@ void patch_pagezero(FILE *obj_file, off_t offset, struct load_command *cmd, BOOL
     
     //----If it's a FAT binary do not copy it twice----//
     if (!copied) {
-        strcpy((char *)dylib_cmd + sizeof(struct dylib_command), ([[NSString stringWithFormat:@"@executable_path/%@", [@(target) lastPathComponent]] UTF8String]));
+        strcpy((char *)dylib_cmd + sizeof(struct dylib_command), ([[NSString stringWithFormat:@"@executable_path/Frameworks/%@", [@(target) lastPathComponent]] UTF8String]));
     }
     
     printf("\t\t[*] Doing the magic\n");
@@ -94,144 +113,229 @@ void patch_pagezero(FILE *obj_file, off_t offset, struct load_command *cmd, BOOL
     free(dylib_cmd);
 }
 
-void patch_dyldinfo(FILE *file, off_t offset, struct dyld_info_command *dyldinfo) {
-    if (dyldinfo->rebase_off != 0) {
-        
-        //----Some maths takes place in here, we need to iterate over the opcodes----//
-        //----Some of them are just 1 byte, some are 2 bytes, some are whole strings----//
-        //----We only need the ones referencing to segments, which are 1 byte----//
-        
-        for (int i = 0; i < dyldinfo->rebase_size; i++) {
-            uint8_t *bytes = load_bytes(file, offset + dyldinfo->rebase_off + i, sizeof(uint8_t));
-            
-            if ((*bytes & REBASE_OPCODE_MASK) == REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB) {
-                printf("\t\t[-] REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before = 0x%x\n", *bytes);
-                *bytes -= 1; // "-1" -> one less segment = previous segment
-                write_bytes(file, offset + dyldinfo->rebase_off + i, sizeof(uint8_t), bytes);
-                bytes = load_bytes(file, offset + dyldinfo->rebase_off + i, sizeof(uint8_t));
-                printf("\t\t[+] REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB now = 0x%x\n", *bytes);
+static inline uintptr_t read_uleb128(uint8_t** pp, uint8_t* end)
+{
+    uint8_t* p = *pp;
+    uint64_t result = 0;
+    int         bit = 0;
+    do {
+        assert(p != end);
+        uint64_t slice = *p & 0x7f;
+        assert(bit <= 63);
+        result |= (slice << bit);
+        bit += 7;
+    } while (*p++ & 0x80);
+
+    *pp = p;
+    return result;
+}
+
+static inline uintptr_t read_sleb128(uint8_t** pp, uint8_t* end)
+{
+    uint8_t* p = *pp;
+    int64_t result = 0;
+    int bit = 0;
+    uint8_t byte;
+    do {
+        assert(p != end);
+        byte = *p++;
+        result |= (((int64_t)(byte & 0x7f)) << bit);
+        bit += 7;
+    } while (byte & 0x80);
+    // sign extend negative numbers
+    if ( (byte & 0x40) != 0 )
+        result |= (-1LL) << bit;
+    *pp = p;
+    return result;
+}
+
+static inline void read_string(uint8_t** pp, uint8_t* end)
+{
+    uint8_t* p = *pp;
+    while (*p != '\0' && (p < end))
+        ++p;
+    ++p;
+    *pp = p;
+}
+
+// <3 qwerty
+void rebase(struct dyld_info_command* dyld_info,
+            uint8_t* map) {
+    uint8_t* start = map;
+    uint8_t* end = start + dyld_info->rebase_size;
+    char done = 0;
+    uint8_t* p = start;
+    while (!done && (p < end)) {
+        uint8_t immediate = *p & REBASE_IMMEDIATE_MASK;
+        uint8_t opcode = *p & REBASE_OPCODE_MASK;
+        ++p;
+
+        switch (opcode) {
+            case REBASE_OPCODE_DONE:
+                done = 1;
                 break;
-            }
-            free(bytes);
-        }
-    }
-    if(dyldinfo->bind_off != 0) {
-        for (int i = 0; i < dyldinfo->bind_size; i++) {
-            uint8_t *bytes = load_bytes(file, offset + dyldinfo->bind_off + i, sizeof(uint8_t));
-            
-            switch (*bytes & BIND_OPCODE_MASK) {
-                case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
-                    printf("\t\t[-] BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before = 0x%x\n", *bytes);
-                    if ((*bytes & 0xF) == 2) *bytes -= 1;
-                    write_bytes(file, offset + dyldinfo->bind_off + i, sizeof(uint8_t), bytes);
-                    bytes = load_bytes(file, offset + dyldinfo->bind_off + i, sizeof(uint8_t));
-                    printf("\t\t[+] BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB now = 0x%x\n", *bytes);
-                    while (*bytes != BIND_OPCODE_DO_BIND) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: // this means a string is coming next
-                    while (*bytes != 0) { //all strings end with 0 (null byte) and don't have 0 in their body
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                case BIND_OPCODE_ADD_ADDR_ULEB:
-                    while (*bytes != BIND_OPCODE_DO_BIND) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                default:
-                    break;
-            }
-            free(bytes);
-        }
-    }
-    if(dyldinfo->lazy_bind_off != 0) {
-        for (int i = 0; i < dyldinfo->lazy_bind_size; i++) {
-            uint8_t *bytes = load_bytes(file, offset + dyldinfo->lazy_bind_off + i, sizeof(uint8_t));
-            
-            switch (*bytes & BIND_OPCODE_MASK) {
-                case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
-                    printf("\t\t[-] BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before = 0x%x\n", *bytes);
-                    if ((*bytes & 0xF) == 2) *bytes -= 1;
-                    write_bytes(file, offset + dyldinfo->lazy_bind_off + i, sizeof(uint8_t), bytes);
-                    bytes = load_bytes(file, offset + dyldinfo->lazy_bind_off + i, sizeof(uint8_t));
-                    printf("\t\t[+] BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB now = 0x%x\n", *bytes);
-                    while (*bytes != BIND_OPCODE_DO_BIND) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->lazy_bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
-                    while (*bytes != 0) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->lazy_bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                case BIND_OPCODE_ADD_ADDR_ULEB:
-                    while (*bytes != BIND_OPCODE_DO_BIND) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->lazy_bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                default:
-                    break;
-            }
-            free(bytes);
-        }
-    }
-    if(dyldinfo->weak_bind_off != 0) {
-        for (int i = 0; i < dyldinfo->weak_bind_size; i++) {
-            uint8_t *bytes = load_bytes(file, offset + dyldinfo->weak_bind_off + i, sizeof(uint8_t));
-            
-            switch (*bytes & BIND_OPCODE_MASK) {
-                case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
-                    printf("\t\t[-] BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before = 0x%x\n", *bytes);
-                    if ((*bytes & 0xF) == 2) *bytes -= 1;
-                    write_bytes(file, offset + dyldinfo->weak_bind_off + i, sizeof(uint8_t), bytes);
-                    bytes = load_bytes(file, offset + dyldinfo->weak_bind_off + i, sizeof(uint8_t));
-                    printf("\t\t[+] BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB now = 0x%x\n", *bytes);
-                    while (*bytes != BIND_OPCODE_DO_BIND) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->weak_bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
-                    while (*bytes != 0) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->weak_bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                case BIND_OPCODE_ADD_ADDR_ULEB:
-                    while (*bytes != BIND_OPCODE_DO_BIND) {
-                        i += 1;
-                        bytes = load_bytes(file, offset + dyldinfo->weak_bind_off + i, sizeof(uint8_t));
-                    }
-                    break;
-                default:
-                    break;
-            }
-            free(bytes);
+            case REBASE_OPCODE_SET_TYPE_IMM:
+                assert(immediate == REBASE_TYPE_POINTER);
+                break;
+            case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+                printf("REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before %p 0x%02x\n", &p[-1], p[-1]);
+                p[-1] -= 1;
+                printf("REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB after  %p 0x%02x\n", &p[-1], p[-1]);
+                read_uleb128(&p, end);
+                break;
+            case REBASE_OPCODE_ADD_ADDR_ULEB:
+                read_uleb128(&p, end);
+                break;
+            case REBASE_OPCODE_ADD_ADDR_IMM_SCALED:
+                break;
+            case REBASE_OPCODE_DO_REBASE_IMM_TIMES:
+                break;
+            case REBASE_OPCODE_DO_REBASE_ULEB_TIMES:
+                read_uleb128(&p, end);
+                break;
+            case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB:
+                read_uleb128(&p, end);
+                break;
+            case REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB:
+                read_uleb128(&p, end);
+                read_uleb128(&p, end);
+                break;
+            default:
+                assert(0);
+                break;
         }
     }
 }
 
-int dylibify(const char *macho, const char *saveto) {
-    
-    NSError *error;
+void bindit(uint8_t* map, size_t sz) {
+    printf("bindit opcode buf: %p size: %zx\n", map, sz);
+    uint8_t* start = map;
+    uint8_t* end = start + sz;
+    char done = 0;
+    uint8_t* p = start;
+
+    while (!done && (p < end)) {
+        uint8_t immediate = *p & BIND_IMMEDIATE_MASK;
+        uint8_t opcode = *p & BIND_OPCODE_MASK;
+        ++p;
+        switch (opcode) {
+            case BIND_OPCODE_DONE:
+//                done = 1;
+                break;
+            case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+                break;
+            case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+                read_uleb128(&p, end);
+                break;
+            case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+                break;
+            case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
+                printf("BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM symbol name: %s\n", p);
+                read_string(&p, end);
+                break;
+            case BIND_OPCODE_SET_TYPE_IMM:
+                break;
+            case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+                printf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before %p 0x%02x\n", &p[-1], p[-1]);
+                p[-1] -= 1;
+                printf("BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB after  %p 0x%02x\n", &p[-1], p[-1]);
+                read_uleb128(&p, end);
+                break;
+            case BIND_OPCODE_SET_ADDEND_SLEB:
+                read_sleb128(&p, end);
+                break;
+            case BIND_OPCODE_ADD_ADDR_ULEB:
+                read_uleb128(&p, end);
+                break;
+            case BIND_OPCODE_DO_BIND:
+                printf("BIND_OPCODE_DO_BIND\n");
+                break;
+            case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
+                read_uleb128(&p, end);
+                break;
+            case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
+                break;
+            case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
+                read_uleb128(&p, end);
+                read_uleb128(&p, end);
+                break;
+            default:
+                printf("opcode: 0x%x\n", opcode);
+                assert(0);
+                break;
+        }
+    }
+}
+
+
+
+void patch_dyldinfo(FILE *file, off_t offset, struct dyld_info_command *dyldinfo) {
+    if (dyldinfo->rebase_off != 0) {
+        printf("\n\n\nrebase\n\n\n");
+        //----Some maths takes place in here, we need to iterate over the opcodes----//
+        //----Some of them are just 1 byte, some are 2 bytes, some are whole strings----//
+        //----We only need the ones referencing to segments, which are 1 byte----//
+        
+        // for (int i = 0; i < dyldinfo->rebase_size; i++) {
+        //     uint8_t *bytes = load_bytes(file, offset + dyldinfo->rebase_off + i, sizeof(uint8_t));
+            
+        //     if ((*bytes & REBASE_OPCODE_MASK) == REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB) {
+        //         printf("\t\t[-] REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB before = 0x%x\n", *bytes);
+        //         *bytes -= 1; // "-1" -> one less segment = previous segment
+        //         write_bytes(file, offset + dyldinfo->rebase_off + i, sizeof(uint8_t), bytes);
+        //         bytes = load_bytes(file, offset + dyldinfo->rebase_off + i, sizeof(uint8_t));
+        //         printf("\t\t[+] REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB now = 0x%x\n", *bytes);
+        //         break;
+        //     }
+        //     free(bytes);
+        // }
+        uint8_t *bytes = load_bytes(file, offset + dyldinfo->rebase_off, dyldinfo->rebase_size);
+        rebase(dyldinfo, bytes);
+        write_bytes(file, offset + dyldinfo->rebase_off, dyldinfo->rebase_size, bytes);
+        free(bytes);
+    }
+    if(dyldinfo->bind_off != 0) {
+        printf("\n\n\nbind\n\n\n");
+        uint8_t *bytes = load_bytes(file, offset + dyldinfo->bind_off, dyldinfo->bind_size);
+        bindit(bytes, dyldinfo->bind_size);
+        write_bytes(file, offset + dyldinfo->bind_off, dyldinfo->bind_size, bytes);
+        free(bytes);
+    }
+    if(dyldinfo->lazy_bind_off != 0) {
+        printf("\n\n\nlazy bind\n\n\n");
+        uint8_t *bytes = load_bytes(file, offset + dyldinfo->lazy_bind_off, dyldinfo->lazy_bind_size);
+        bindit(bytes, dyldinfo->lazy_bind_size);
+        write_bytes(file, offset + dyldinfo->lazy_bind_off, dyldinfo->lazy_bind_size, bytes);
+        free(bytes);
+    }
+    if(dyldinfo->weak_bind_off != 0) {
+        printf("\n\n\nweak bind\n\n\n");
+        uint8_t *bytes = load_bytes(file, offset + dyldinfo->weak_bind_off, dyldinfo->weak_bind_size);
+        bindit(bytes, dyldinfo->weak_bind_size);
+        write_bytes(file, offset + dyldinfo->weak_bind_off, dyldinfo->weak_bind_size, bytes);
+        free(bytes);
+    }
+}
+
+int dylibify(NSDictionary *args) {
+    NSError *error = nil;
     NSFileManager *fileManager = [NSFileManager defaultManager];
     
     //----Make sure we don't overwrite any file----//
-    if ([fileManager fileExistsAtPath:@(saveto)]) {
-        printf("[!] %s file exists!\n", saveto);
-        return -1;
+    if ([fileManager fileExistsAtPath:args[@"out"]]) {
+        if (true) {
+            if (![fileManager removeItemAtPath:args[@"out"] error:&error] || error) {
+                printf("[!] %s\n", [[error localizedDescription] UTF8String]);
+                return -1;
+            }
+        } else {
+            printf("[!] %s file exists!\n", [args[@"out"] UTF8String]);
+            return -1;
+        }
     }
     
     //----Create a copy of the file on the target destination----//
-    [fileManager copyItemAtPath:@(macho) toPath:@(saveto) error:&error];
+    [fileManager copyItemAtPath:args[@"in"] toPath:args[@"out"] error:&error];
     
     //----Handle errors----//
     if (error) {
@@ -242,7 +346,7 @@ int dylibify(const char *macho, const char *saveto) {
     
     
     //----Open the copied file for updating, in binary mode----//
-    FILE *file = fopen(saveto, "r+b");
+    FILE *file = fopen([args[@"out"] UTF8String], "r+b");
     
     //----This variable will hold the binary location as we move on through reading it----//
     size_t offset = 0;
@@ -277,7 +381,7 @@ int dylibify(const char *macho, const char *saveto) {
                 
                 //----Dylibs don't have the PAGEZERO segment, replace it with a LC_ID_DYLIB command----//
                 if (!strcmp(seg64->segname, "__PAGEZERO")) {
-                    patch_pagezero(file, offset, cmd, copied, seg64, sizeof(struct segment_command_64), saveto);
+                    patch_pagezero(file, offset, cmd, copied, seg64, sizeof(struct segment_command_64), [args[@"out"] UTF8String]);
                 }
                 free(seg64);
             }
@@ -288,6 +392,12 @@ int dylibify(const char *macho, const char *saveto) {
                 //----Since we removed one segment we have to to rework opcodes so DATA is not confused with LINKEDIT----//
                 patch_dyldinfo(file, 0, dyldinfo);
                 free(dyldinfo);
+            }
+            else if (cmd->cmd == LC_BUILD_VERSION) {
+                printf("[*] found BUILD_VERSION!\n");
+                struct build_version_command *buildver = load_bytes(file, offset, sizeof(struct build_version_command));
+                patch_buildver(file, offset, buildver);
+                free(buildver);
             }
             else {
                 printf("[i] LOAD COMMAND %d = 0x%x\n", i, cmd->cmd);
@@ -317,7 +427,7 @@ int dylibify(const char *macho, const char *saveto) {
                 printf("\t[i] LC_SEGMENT (%s)\n", seg->segname);
                 
                 if (!strcmp(seg->segname, "__PAGEZERO")) {
-                    patch_pagezero(file, offset, cmd, copied, seg, sizeof(struct segment_command), saveto);
+                    patch_pagezero(file, offset, cmd, copied, seg, sizeof(struct segment_command), [args[@"out"] UTF8String]);
                 }
                 
                 free(seg);
@@ -370,7 +480,7 @@ int dylibify(const char *macho, const char *saveto) {
                         printf("\t[i] LC_SEGMENT_64 (%s)\n", seg64->segname);
                         
                         if (!strcmp(seg64->segname, "__PAGEZERO")) {
-                            patch_pagezero(file, offset, cmd, copied, seg64, sizeof(struct segment_command_64), saveto);
+                            patch_pagezero(file, offset, cmd, copied, seg64, sizeof(struct segment_command_64), [args[@"out"] UTF8String]);
                             copied = true;
                         }
                         free(seg64);
@@ -380,6 +490,12 @@ int dylibify(const char *macho, const char *saveto) {
                         struct dyld_info_command *dyldinfo = load_bytes(file, offset, sizeof(struct dyld_info_command));
                         patch_dyldinfo(file, SWAP32(arch->offset), dyldinfo);
                         free(dyldinfo);
+                    }
+                    else if (cmd->cmd == LC_BUILD_VERSION) {
+                        printf("[*] found BUILD_VERSION!\n");
+                        struct build_version_command *buildver = load_bytes(file, offset, sizeof(struct build_version_command));
+                        patch_buildver(file, SWAP32(arch->offset), buildver);
+                        free(buildver);
                     }
                     else {
                         printf("[i] LOAD COMMAND %d = 0x%x\n", i, cmd->cmd);
@@ -405,7 +521,7 @@ int dylibify(const char *macho, const char *saveto) {
                         struct segment_command *seg = load_bytes(file, offset, sizeof(struct segment_command));
                         printf("\t[i] LC_SEGMENT (%s)\n", seg->segname);
                         if (!strcmp(seg->segname, "__PAGEZERO")) {
-                            patch_pagezero(file, offset, cmd, copied, seg, sizeof(struct segment_command), saveto);
+                            patch_pagezero(file, offset, cmd, copied, seg, sizeof(struct segment_command), [args[@"out"] UTF8String]);
                             copied = true;
                         }
                         free(seg);
@@ -444,12 +560,14 @@ err:
     return -1;
 }
 
-int main(int argc, const char * argv[]) {
-     if (argc != 3) {
-         printf("Usage:\n\t%s <in> <out>\nExample:\n\t%s /usr/bin/executable /usr/lib/dylibified.dylib\n", argv[0], argv[0]);
+int main(int argc, const char **argv) {
+    NSDictionary *args = [[ NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain];
+    NSLog(@"args: %@", args);
+     if (!args[@"in"] || !args[@"out"]) {
+         printf("Usage:\n\t%s -in <in> -out <out>\nExample:\n\t%s -in /usr/bin/executable -out /usr/lib/dylibified.dylib\n", argv[0], argv[0]);
          return -1;
      }
     
-    dylibify(argv[1], argv[2]);
+    dylibify(args);
     return 0;
 }
