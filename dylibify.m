@@ -78,6 +78,46 @@ void patch_buildver(FILE *obj_file, off_t offset, struct build_version_command *
     write_bytes(obj_file, offset, sizeof(struct build_version_command), buildver);
 }
 
+void patch_minver(FILE *obj_file, off_t offset, struct version_min_command *minver, off_t mh_off, struct mach_header_64 *mh) {
+    printf("[*] Patching minver to buildver\n");
+    printf("[-] PLATFORM was 0x%x\n", minver->cmd);
+    printf("[-] MINOS was: 0x%x\n", minver->version);
+    printf("[-] SDK was: 0x%x\n", minver->sdk);
+
+    struct build_version_command *buildver = malloc(32);
+    buildver->cmd = LC_BUILD_VERSION;
+    // overwrite following LC_SOURCE_VERSION
+    buildver->cmdsize = 32;
+    buildver->platform = PLATFORM_MACOS;
+    buildver->minos = 0x000b0000;
+    buildver->sdk = 0x000b0000;
+    buildver->ntools = 1;
+    struct build_tool_version *toolver = (void *)((uintptr_t)buildver + sizeof(struct build_version_command));
+    toolver->tool = 3;
+    toolver->version = 0x13371337;
+
+    printf("[-] PLATFORM is 0x%x\n", buildver->platform);
+    printf("[-] MINOS is: 0x%x\n", buildver->minos);
+    printf("[-] SDK is: 0x%x\n", buildver->sdk);
+
+    write_bytes(obj_file, offset, 32, buildver);
+
+    printf("[-] mh ncmds was %d\n", mh->ncmds);
+    mh->ncmds -= 1;
+    printf("[-] mh ncmds is %d mh off: 0x%llx\n", mh->ncmds, mh_off);
+    write_bytes(obj_file, mh_off, sizeof(*mh), mh);
+
+    // minver->cmd = LC_VERSION_MIN_MACOSX;
+    // minver->version = 0x000b0000;
+    // minver->sdk = 0x000b0000;
+    
+    // printf("[-] PLATFORM is 0x%x\n", minver->cmd);
+    // printf("[-] MINOS is: 0x%x\n", minver->version);
+    // printf("[-] SDK is: 0x%x\n", minver->sdk);
+
+    // write_bytes(obj_file, offset, sizeof(struct version_min_command), minver);
+}
+
 void patch_pagezero(FILE *obj_file, off_t offset, struct load_command *cmd, BOOL copied, void *seg, size_t sizeofseg, const char *target) {
     
     uint32_t size = cmd->cmdsize;
@@ -362,12 +402,12 @@ int dylibify(NSDictionary *args) {
         printf("[i] 64bit binary\n");
         
         struct mach_header_64 *mh64 = load_bytes(file, offset, sizeof(struct mach_header_64));
+        off_t mh64_off = offset;
         
         //----Patch filetype and add MH_NO_REEXPORTED_DYLIB flag (required for linking with it)----//
         patch_mach_header(file, offset, mh64, true); //patch
         offset += sizeof(struct mach_header_64);
         ncmds = mh64->ncmds;
-        free(mh64);
         
         printf("[i] %d LOAD COMMANDS\n", ncmds);
         
@@ -398,6 +438,12 @@ int dylibify(NSDictionary *args) {
                 struct build_version_command *buildver = load_bytes(file, offset, sizeof(struct build_version_command));
                 patch_buildver(file, offset, buildver);
                 free(buildver);
+            }
+            else if (cmd->cmd == LC_VERSION_MIN_IPHONEOS) {
+                printf("[*] found VERSION_MIN_IPHONEOS!\n");
+                struct version_min_command *minver = load_bytes(file, offset, sizeof(struct version_min_command));
+                patch_minver(file, offset, minver, mh64_off, mh64);
+                free(minver);
             }
             else {
                 printf("[i] LOAD COMMAND %d = 0x%x\n", i, cmd->cmd);
@@ -465,10 +511,10 @@ int dylibify(NSDictionary *args) {
                 printf("[i] Found 64bit architecture\n");
                 
                 struct mach_header_64 *mh64 = load_bytes(file, offset, sizeof(struct mach_header_64));
+                off_t mh64_off = offset;
                 patch_mach_header(file, offset, mh64, true);
                 offset += sizeof(struct mach_header_64);
                 ncmds = mh64->ncmds;
-                free(mh64);
                 
                 printf("[i] %d LOAD COMMANDS\n", ncmds);
                 
@@ -496,6 +542,12 @@ int dylibify(NSDictionary *args) {
                         struct build_version_command *buildver = load_bytes(file, offset, sizeof(struct build_version_command));
                         patch_buildver(file, SWAP32(arch->offset), buildver);
                         free(buildver);
+                    }
+                    else if (cmd->cmd == LC_VERSION_MIN_IPHONEOS) {
+                        printf("[*] found VERSION_MIN_IPHONEOS!\n");
+                        struct version_min_command *minver = load_bytes(file, offset, sizeof(struct version_min_command));
+                        patch_minver(file, offset, minver, mh64_off, mh64);
+                        free(minver);
                     }
                     else {
                         printf("[i] LOAD COMMAND %d = 0x%x\n", i, cmd->cmd);
