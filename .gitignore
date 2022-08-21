@@ -1,1 +1,3 @@
-dylibify
+obj-c/dylibify
+.idea/
+dylibify.egg-info/
