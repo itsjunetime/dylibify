@@ -31,6 +31,8 @@ def dylibify(
     if dylib_path is not None:
         raise NotImplementedError("Implement custom dylib ID")
 
+    lief.logging.set_level(lief.logging.LOGGING_LEVEL.TRACE)
+
     binary = lief.parse(in_path)
     assert binary is not None
 
@@ -76,7 +78,7 @@ def dylibify(
                 f"Removing symbol '{imported_sym.name}' imported from '{imported_sym.binding_info.library.name}'"
             )
 
-    for cmd in binary.commands:
+    for i, cmd in enumerate(binary.commands):
         if (
             not isinstance(cmd, lief.MachO.DylibCommand)
             or cmd.command == lief.MachO.LOAD_COMMAND_TYPES.ID_DYLIB
@@ -86,6 +88,7 @@ def dylibify(
             continue
         dbg(f"Removing load command for dylib '{cmd.name}' of type '{cmd.command}'")
         binary.remove(cmd)
+        # binary.remove_command(i)
 
     for dylib in remove_dylibs:
         pass
