@@ -4,23 +4,38 @@ import argparse
 import logging
 from pathlib import Path
 
-log = logging.getLogger(__name__)
+from dylibify.patch import dylibify
+
+log = logging.getLogger("dylibify")
 
 
 def real_main(args):
     if args.verbose:
         log.setLevel(logging.DEBUG)
     log.debug(f"tool args: {args}")
+    dylibify(
+        args.in_path,
+        args.out_path,
+        args.dylib_path,
+        args.remove_dylib,
+        args.remove_info_plist,
+        args.ios,
+        args.macos,
+    )
 
 
 def get_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="dylibify")
-    parser.add_argument("-i", "--in", type=Path, required=True, help="Input Mach-O executable")
-    parser.add_argument("-o", "--out", type=Path, required=True, help="Output Mach-O dylib")
+    parser.add_argument("-i", "--in", dest="in_path", required=True, help="Input Mach-O executable")
+    parser.add_argument("-o", "--out", dest="out_path", required=True, help="Output Mach-O dylib")
     parser.add_argument(
         "-d",
         "--dylib-path",
         help="Path for LC_ID_DYLIB command. e.g. @executable_path/Frameworks/libfoo.dylib",
+    )
+    parser.add_argument("-r", "--remove-dylib", action="append", help="Remove dylib dependency")
+    parser.add_argument(
+        "-P", "--remove-info-plist", action="store_true", help="Remove __info_plist section"
     )
     platform_args = parser.add_mutually_exclusive_group()
     platform_args.add_argument("-I", "--ios", action="store_true", help="Patch platform to iOS")
