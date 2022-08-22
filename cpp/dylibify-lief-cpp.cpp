@@ -36,6 +36,17 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
     std::unique_ptr<FatBinary> binaries = Parser::parse(in_path);
 
     for (Binary &binary : *binaries) {
+        auto &hdr = binary.header();
+        assert(hdr.file_type() == FILE_TYPES::MH_EXECUTE);
+        if (verbose) {
+            fmt::print("[-] Changing Mach-O type from executable to dylib\n");
+        }
+        hdr.file_type(FILE_TYPES::MH_DYLIB);
+        if (verbose) {
+            fmt::print("[-] Adding NO_REXPORTED_LIBS flag\n");
+        }
+        hdr.flags(hdr.flags() | (uint32_t)HEADER_FLAGS::MH_NO_REEXPORTED_DYLIBS);
+
         if (binary.code_signature()) {
             if (verbose) {
                 fmt::print("[-] Removing code signature\n");
