@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -11,6 +12,7 @@
 #include <argparse/argparse.hpp>
 #include <fmt/format.h>
 
+namespace fs = std::filesystem;
 using namespace LIEF::MachO;
 
 static bool dylib_exists(const std::string &dylib_path) {
@@ -52,6 +54,24 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
                 fmt::print("[-] Removing code signature\n");
             }
             assert(binary.remove_signature());
+        }
+
+        if (auto *pgz_seg = binary.get_segment("__PAGEZERO")) {
+            if (verbose) {
+                fmt::print("[-] Remvoing __PAGEZERO segment\n");
+            }
+            binary.remove(*pgz_seg);
+        }
+
+        std::string new_dylib_path;
+        if (dylib_path != std::nullopt) {
+            new_dylib_path = *dylib_path;
+        } else {
+            fs::path dylib_path{out_path};
+            new_dylib_path = fs::path{"@executable_path"} / dylib_path.filename();
+        }
+        if (verbose) {
+            fmt::print("[-] Setting ID_DYLIB path to: '{:s}'\n", new_dylib_path);
         }
 
         if (remove_info_plist) {
