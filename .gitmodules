@@ -1,0 +1,9 @@
+[submodule "cpp/3rdparty/LIEF"]
+	path = cpp/3rdparty/LIEF
+	url = https://github.com/lief-project/LIEF
+[submodule "cpp/3rdparty/fmt"]
+	path = cpp/3rdparty/fmt
+	url = https://github.com/fmtlib/fmt
+[submodule "cpp/3rdparty/argparse"]
+	path = cpp/3rdparty/argparse
+	url = https://github.com/p-ranav/argparse

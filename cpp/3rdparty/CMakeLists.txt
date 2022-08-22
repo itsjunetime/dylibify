@@ -1,0 +1,18 @@
+add_subdirectory(argparse)
+
+option(FMT_DOC "" OFF)
+option(FMT_TEST "" OFF)
+add_subdirectory(fmt)
+
+option(LIEF_PYTHON_API "" OFF)
+option(LIEF_C_API "" OFF)
+option(LIEF_EXAMPLES "" OFF)
+option(LIEF_LOGGING "" ON)
+option(LIEF_LOGGING_DEBUG "" ON)
+option(LIEF_ENABLE_JSON "" OFF)
+option(LIEF_ELF "" OFF)
+option(LIEF_PE "" OFF)
+option(LIEF_MACHO "" ON)
+option(LIEF_DEX "" OFF)
+option(LIEF_ART "" OFF)
+add_subdirectory(LIEF)
