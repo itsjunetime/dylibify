@@ -1,6 +1,7 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,11 +11,49 @@
 #include <argparse/argparse.hpp>
 #include <fmt/format.h>
 
-void dylibify(std::string in_path, std::string out_path, std::optional<std::string> dylib_path,
-              std::vector<std::string> remove_dylibs, bool auto_remove_dylibs = false,
-              bool remove_info_plist = false, bool ios = false, bool macos = false,
-              bool verbose = false) {
+using namespace LIEF::MachO;
+
+static bool dylib_exists(const std::string &dylib_path) {
+    if (auto *handle = dlopen(dylib_path.c_str(), RTLD_LAZY | RTLD_LOCAL)) {
+        dlclose(handle);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+static void dylibify(const std::string &in_path, const std::string &out_path,
+                     const std::optional<std::string> dylib_path,
+                     const std::vector<std::string> remove_dylibs,
+                     const bool auto_remove_dylibs = false, const bool remove_info_plist = false,
+                     const bool ios = false, const bool macos = false, const bool verbose = false) {
     assert(!(ios && macos));
+
+    if (verbose) {
+        LIEF::logging::set_level(LIEF::logging::LOGGING_LEVEL::LOG_TRACE);
+    }
+
+    std::unique_ptr<FatBinary> binaries = Parser::parse(in_path);
+
+    for (Binary &binary : *binaries) {
+        if (binary.code_signature()) {
+            if (verbose) {
+                fmt::print("[-] Removing code signature\n");
+            }
+            assert(binary.remove_signature());
+        }
+
+        if (remove_info_plist) {
+            if (const auto *plist_sect = binary.get_section("__TEXT", "__info_plist")) {
+                if (verbose) {
+                    fmt::print("[-] Removing __TEXT,__info_plist\n");
+                }
+                binary.remove_section("__TEXT", "__info_plist", true);
+            }
+        }
+    }
+
+    binaries->write(out_path);
 }
 
 int main(int argc, const char **argv) {
@@ -42,7 +81,7 @@ int main(int argc, const char **argv) {
         .default_value(false)
         .implicit_value(true)
         .help("patch platform to macOS");
-    parser.add_argument("-v", "--verbose")
+    parser.add_argument("-V", "--verbose")
         .default_value(false)
         .implicit_value(true)
         .help("verbose mode");
@@ -54,7 +93,7 @@ int main(int argc, const char **argv) {
         return -1;
     }
 
-    dylibify(parser.get<std::string>("--in-path"), parser.get<std::string>("--out-path"),
+    dylibify(parser.get<std::string>("--in"), parser.get<std::string>("--out"),
              parser.present("--dylib-path"), parser.get<std::vector<std::string>>("--remove-dylib"),
              parser.get<bool>("--auto-remove-dylibs"), parser.get<bool>("--remove-info-plist"),
              parser.get<bool>("--ios"), parser.get<bool>("--macos"), parser.get<bool>("--verbose"));
