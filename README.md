@@ -9,3 +9,11 @@ It's my really first time playing with Mach-O's like this so don't expect top qu
 - Add a LC_ID_DYLIB command where PAGEZERO previously was to identify the dylib
 - Patch opcodes: Since we got rid of PAGEZERO we have one less segment thus we need to patch whatever is referencing to SEGMENT X to SEGMENT X-1.
 - Look into the code comments for more details
+
+# Python/LIEF version
+## Installing LIEF
+git clone
+
+Optionally patch setup.py to replace RelWithDebugInfo with Debug
+
+`python3 ./setup.py -v --ninja --lief-no-elf --lief-no-pe --lief-no-android build --debug install`
