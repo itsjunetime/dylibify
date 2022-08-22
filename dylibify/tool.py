@@ -18,6 +18,7 @@ def real_main(args):
         args.out_path,
         args.dylib_path,
         args.remove_dylib,
+        args.auto_remove_dylibs,
         args.remove_info_plist,
         args.ios,
         args.macos,
@@ -34,6 +35,12 @@ def get_arg_parser() -> argparse.ArgumentParser:
         help="Path for LC_ID_DYLIB command. e.g. @executable_path/Frameworks/libfoo.dylib",
     )
     parser.add_argument("-r", "--remove-dylib", action="append", help="Remove dylib dependency")
+    parser.add_argument(
+        "-R",
+        "--auto-remove-dylibs",
+        action="store_true",
+        help="Automatically remove unavailable dylib dependencies",
+    )
     parser.add_argument(
         "-P", "--remove-info-plist", action="store_true", help="Remove __info_plist section"
     )

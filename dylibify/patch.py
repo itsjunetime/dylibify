@@ -1,3 +1,4 @@
+import ctypes
 import logging
 from typing import Optional
 
@@ -13,6 +14,7 @@ def dylibify(
     out_path: str,
     dylib_path: Optional[str] = None,
     remove_dylibs: Optional[list[str]] = None,
+    auto_remove_dylibs: bool = False,
     remove_info_plist: bool = False,
     ios: bool = False,
     macos: bool = False,
@@ -23,8 +25,6 @@ def dylibify(
     assert not (ios and macos)
 
     if ios:
-        log("fack l")
-        dbg("fack d")
         raise NotImplementedError("Implement iOS platform setting")
     if macos:
         raise NotImplementedError("Implement macOS platform setting")
@@ -34,12 +34,29 @@ def dylibify(
     binary = lief.parse(in_path)
     assert binary is not None
 
-    dbg("Removing signature")
+    log("Removing signature")
     binary.remove_signature()
 
     if remove_info_plist:
-        dbg("Removing __TEXT,__info_plist section")
+        log("Removing __TEXT,__info_plist section")
         binary.remove_section("__TEXT", "__info_plist")
+
+    missing_dylibs = []
+
+    if auto_remove_dylibs:
+        for cmd in (
+            cmd
+            for cmd in binary.commands
+            if isinstance(cmd, lief.MachO.DylibCommand)
+            and cmd.command != lief.MachO.LOAD_COMMAND_TYPES.ID_DYLIB
+        ):
+            dbg(f"Trying to load dependant dylib '{cmd.name}'")
+            try:
+                handle = ctypes.CDLL(cmd.name)
+                del handle
+            except OSError:
+                missing_dylibs.append(cmd.name)
+                log(f"Missing dylib '{cmd.name}' will be removed")
 
     removed_imports = {}
 
