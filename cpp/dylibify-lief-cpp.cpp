@@ -87,12 +87,57 @@ static std::optional<fs::path> create_thin_stub_dylib(const fs::path &fat_stub_f
     const auto objc = create_stub_objc(stub_syms);
     const auto arch = arch_map.at(cpu_type);
 
-    fmt::print("{:s}\n", objc);
-    return "";
+    const auto out_dir           = out_path.parent_path();
+    auto thin_sub_dylib_filename = fat_stub_filename.stem();
+    thin_sub_dylib_filename += "." + arch;
+    auto thin_stub_src_filename{thin_sub_dylib_filename};
+    thin_stub_src_filename += ".m";
+    thin_sub_dylib_filename += fat_stub_filename.extension();
+    const auto thin_stub_dylib_path = out_dir / thin_sub_dylib_filename;
+    const auto thin_stub_src_path   = out_dir / thin_stub_src_filename;
+
+    write_string_to_file(objc, thin_stub_src_filename);
+
+    const auto install_name_opt = "-Wl,-install_name,"s + stub_dylib_path.string();
+    int res{-1};
+    try {
+        res = subprocess::call({"clang", "-arch", arch.c_str(), "-o", thin_stub_dylib_path.c_str(),
+                                thin_stub_src_filename.c_str(), "-shared", "-fobjc-arc",
+                                "-framework", "Foundation", install_name_opt.c_str()});
+    } catch (const std::runtime_error &e) {
+        fmt::print("[-] Error when running stub dylib build: '{:s}'\n", e.what());
+        return std::nullopt;
+    }
+    if (res) {
+        fmt::print("[-] Error when running stub dylib build: return code {:d}\n", res);
+        return std::nullopt;
+    }
+
+    return thin_stub_dylib_path;
 }
 
-static bool create_fat_stub_dylib(const fs::path &fat_stub_filename,
+static bool create_fat_stub_dylib(const fs::path &fat_stub_filename, const fs::path &out_path,
                                   const std::vector<fs::path> &thin_stubs) {
+    const auto fat_stub_path = out_path.parent_path() / fat_stub_filename;
+    std::vector<std::string> stub_path_strs;
+    for (const auto &sp : thin_stubs) {
+        stub_path_strs.emplace_back(sp.string());
+    }
+    const auto cmd = fmt::format("lipo -create -output {:s} {}", fat_stub_path.string(),
+                                 fmt::join(stub_path_strs, " "));
+
+    int res{-1};
+    try {
+        res = subprocess::call(cmd);
+    } catch (const std::runtime_error &e) {
+        fmt::print("[-] Error when running fat dylib lipo: '{:s}'\n", e.what());
+        return false;
+    }
+    if (res) {
+        fmt::print("[-] Error when running fat dylib lipo: return code {:d}\n", res);
+        return false;
+    }
+
     return true;
 }
 
@@ -343,7 +388,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         if (verbose) {
             fmt::print("[-] Generating fat stub dylib at '{:s}'\n", fat_stub_filename.string());
         }
-        if (!create_fat_stub_dylib(fat_stub_filename, thin_stubs)) {
+        if (!create_fat_stub_dylib(fat_stub_filename, out_path, thin_stubs)) {
             fmt::print("[!] Error generating fat stub dylib!\n");
             return false;
         }
