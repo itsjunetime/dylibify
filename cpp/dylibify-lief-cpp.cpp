@@ -27,7 +27,7 @@ static bool dylib_exists(const std::string &dylib_path) {
 }
 
 struct SymInfo {
-    const Symbol *sym;
+    Symbol *sym;
     std::string lib;
 };
 
@@ -45,6 +45,34 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
     auto binaries = Parser::parse(in_path);
 
     for (auto &binary : *binaries) {
+        std::map<std::string, const DylibCommand *> orig_libraries;
+        for (const auto &dylib_cmd : binary.libraries()) {
+            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+                continue;
+            }
+            orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
+        }
+
+        std::map<std::string, int32_t> orig_ordinal_map;
+        for (const auto &binding_info : binary.dyld_info()->bindings()) {
+            if (!binding_info.has_library()) {
+                continue;
+            }
+            orig_ordinal_map.emplace(
+                std::make_pair(binding_info.library()->name(), binding_info.library_ordinal()));
+        }
+
+        std::map<std::string, const SymInfo> orig_syms;
+        for (auto &sym : binary.symbols()) {
+            if (!sym.has_binding_info() || !sym.binding_info()->has_library()) {
+                continue;
+            }
+            fmt::print("[-] orig sym '{:s}' ordinal: {:d} lib: '{:s}'\n", sym.name(),
+                       sym.binding_info()->library_ordinal(),
+                       sym.binding_info()->library()->name());
+            orig_syms.emplace(sym.name(), SymInfo{&sym, sym.binding_info()->library()->name()});
+        }
+
         auto &hdr = binary.header();
         assert(hdr.file_type() == FILE_TYPES::MH_EXECUTE);
         if (verbose) {
@@ -70,7 +98,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             binary.remove(*pgz_seg);
         }
 
-        std::string new_dylib_path;
+        fs::path new_dylib_path;
         if (dylib_path != std::nullopt) {
             new_dylib_path = *dylib_path;
         } else {
@@ -78,7 +106,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             new_dylib_path = fs::path{"@executable_path"} / dylib_path.filename();
         }
         if (verbose) {
-            fmt::print("[-] Setting ID_DYLIB path to: '{:s}'\n", new_dylib_path);
+            fmt::print("[-] Setting ID_DYLIB path to: '{:s}'\n", new_dylib_path.string());
         }
         const auto id_dylib_cmd = DylibCommand::id_dylib(new_dylib_path, 2, 0x00010000, 0x00010000);
         binary.add(id_dylib_cmd);
@@ -153,22 +181,6 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             binary.add(new_buildver_cmd);
         }
 
-        std::map<std::string, const DylibCommand *> orig_libraries;
-        for (const auto &dylib_cmd : binary.libraries()) {
-            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
-                continue;
-            }
-            orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
-        }
-
-        std::map<std::string, const SymInfo> orig_syms;
-        for (const auto &sym : binary.imported_symbols()) {
-            if (!sym.has_binding_info() || !sym.binding_info()->has_library()) {
-                continue;
-            }
-            orig_syms.emplace(sym.name(), SymInfo{&sym, sym.binding_info()->library()->name()});
-        }
-
         std::set<std::string> remove_dylib_set;
         for (const auto &dylib : remove_dylibs) {
             if (!orig_libraries.contains(dylib)) {
@@ -206,6 +218,43 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                 fmt::print("[-] Removing dependant dylib '{:s}'\n", dylib);
             }
             binary.remove(*dylib_cmd);
+        }
+
+        std::optional<fs::path> stub_path{std::nullopt};
+        if (remove_sym_set.size()) {
+            *stub_path = new_dylib_path.parent_path() / "dylibify-stubs.dylib";
+            if (verbose) {
+                fmt::print("Creating stub library 'dylibify-stubs.dylib'\n");
+            }
+            const auto stub_dylib_cmd =
+                DylibCommand::load_dylib(*stub_path, 2, 0x00010000, 0x00010000);
+            binary.add(stub_dylib_cmd);
+        }
+
+        std::map<std::string, int32_t> new_ordinal_map;
+        int32_t i{1};
+        for (const auto &dylib_cmd : binary.libraries()) {
+            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+                continue;
+            }
+            new_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), i));
+            fmt::print("[-] library {:d} '{:s}'\n", i, dylib_cmd.name());
+            ++i;
+        }
+
+        for (auto &binding_info : binary.dyld_info()->bindings()) {
+            if (!binding_info.has_library()) {
+                continue;
+            }
+            binding_info.library_ordinal(new_ordinal_map[binding_info.library()->name()]);
+        }
+
+        for (const auto &sym_it : orig_syms) {
+            const auto &sym_name = sym_it.first;
+            const auto &sym_info = sym_it.second;
+            if (remove_sym_set.contains(sym_name)) {
+                sym_info.sym->binding_info()->library_ordinal(new_ordinal_map[*stub_path]);
+            }
         }
     }
 
