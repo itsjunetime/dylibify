@@ -31,7 +31,7 @@ add_compile_options(-O0 -fno-omit-frame-pointer)
 # add_compile_options(-fno-inline)
 # add_link_options(-fno-inline)
 
-# set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 
 add_subdirectory(3rdparty)
 

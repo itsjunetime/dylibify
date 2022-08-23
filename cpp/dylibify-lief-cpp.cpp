@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -25,7 +26,7 @@ static bool dylib_exists(const std::string &dylib_path) {
     }
 }
 
-static void dylibify(const std::string &in_path, const std::string &out_path,
+static bool dylibify(const std::string &in_path, const std::string &out_path,
                      const std::optional<std::string> dylib_path,
                      const std::vector<std::string> remove_dylibs,
                      const bool auto_remove_dylibs = false, const bool remove_info_plist = false,
@@ -148,31 +149,45 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
             binary.add(new_buildver_cmd);
         }
 
-        std::set<std::string> remove_dylib_set{remove_dylibs.cbegin(), remove_dylibs.cend()};
+        std::map<std::string, const DylibCommand *> orig_libraries;
+        for (const auto &dylib_cmd : binary.libraries()) {
+            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+                continue;
+            }
+            orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
+        }
+
+        std::set<std::string> remove_dylib_set;
+        for (const auto &dylib : remove_dylibs) {
+            if (!orig_libraries.contains(dylib)) {
+                fmt::print("[!] Asked to remove dylib '{:s}' but it wasn't found in the imports\n");
+                return false;
+            }
+            remove_dylib_set.emplace(dylib);
+        }
 
         if (auto_remove_dylibs) {
-            for (const auto &dylib_cmd : binary.libraries()) {
-                if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
-                    continue;
-                }
-                const auto &test_dylib_path = dylib_cmd.name();
-                if (!dylib_exists(test_dylib_path)) {
+            for (const auto &i : orig_libraries) {
+                if (!dylib_exists(i.first)) {
                     if (verbose) {
-                        fmt::print("[-] Marking unavailable dylib '{:s}' for removal\n",
-                                   test_dylib_path);
+                        fmt::print("[-] Marking unavailable dylib '{:s}' for removal\n", i.first);
                     }
-                    remove_dylib_set.emplace(test_dylib_path);
+                    remove_dylib_set.emplace(i.first);
                 }
             }
         }
 
-        if (verbose && remove_dylib_set.size()) {
-            fmt::print("[-] Dependant dylib removal list: '{:s}'\n",
-                       fmt::join(remove_dylib_set, "', '"));
+        for (const auto &dylib : remove_dylib_set) {
+            const auto *dylib_cmd = orig_libraries[dylib];
+            if (verbose) {
+                fmt::print("[-] Removing dependant dylib '{:s}'\n", dylib);
+            }
+            binary.remove(*dylib_cmd);
         }
     }
 
     binaries->write(out_path);
+    return true;
 }
 
 int main(int argc, const char **argv) {
@@ -212,10 +227,11 @@ int main(int argc, const char **argv) {
         return -1;
     }
 
-    dylibify(parser.get<std::string>("--in"), parser.get<std::string>("--out"),
-             parser.present("--dylib-path"), parser.get<std::vector<std::string>>("--remove-dylib"),
-             parser.get<bool>("--auto-remove-dylibs"), parser.get<bool>("--remove-info-plist"),
-             parser.get<bool>("--ios"), parser.get<bool>("--macos"), parser.get<bool>("--verbose"));
+    const auto res = dylibify(
+        parser.get<std::string>("--in"), parser.get<std::string>("--out"),
+        parser.present("--dylib-path"), parser.get<std::vector<std::string>>("--remove-dylib"),
+        parser.get<bool>("--auto-remove-dylibs"), parser.get<bool>("--remove-info-plist"),
+        parser.get<bool>("--ios"), parser.get<bool>("--macos"), parser.get<bool>("--verbose"));
 
-    return 0;
+    return res ? 0 : 1;
 }
