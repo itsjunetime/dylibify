@@ -56,7 +56,7 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
             assert(binary.remove_signature());
         }
 
-        if (auto *pgz_seg = binary.get_segment("__PAGEZERO")) {
+        if (const auto *pgz_seg = binary.get_segment("__PAGEZERO")) {
             if (verbose) {
                 fmt::print("[-] Remvoing __PAGEZERO segment\n");
             }
@@ -73,6 +73,8 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
         if (verbose) {
             fmt::print("[-] Setting ID_DYLIB path to: '{:s}'\n", new_dylib_path);
         }
+        const auto id_dylib_cmd = DylibCommand::id_dylib(new_dylib_path, 2, 0x00010000, 0x00010000);
+        binary.add(id_dylib_cmd);
 
         if (remove_info_plist) {
             if (const auto *plist_sect = binary.get_section("__TEXT", "__info_plist")) {
@@ -81,6 +83,58 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
                 }
                 binary.remove_section("__TEXT", "__info_plist", true);
             }
+        }
+
+        if (const auto *dylinker_cmd = binary.dylinker()) {
+            binary.remove(*dylinker_cmd);
+        }
+
+        if (const auto *main_cmd = binary.main_command()) {
+            binary.remove(*main_cmd);
+        }
+
+        if (const auto *src_cmd = binary.source_version()) {
+            binary.remove(*src_cmd);
+        }
+
+        if (ios || macos) {
+            if (const auto *minver_cmd = binary.version_min()) {
+                if (verbose) {
+                    const auto &ver = minver_cmd->version();
+                    const auto &sdk = minver_cmd->sdk();
+                    fmt::print("[-] Removing old VERSION_MIN command (version: '{:d}.{:d}.{:d}' "
+                               "SDK: '{:d}.{:d}.{:d}')\n",
+                               ver[0], ver[1], ver[2], sdk[0], sdk[1], sdk[2]);
+                }
+                binary.remove(*minver_cmd);
+            }
+            if (const auto *buildver_cmd = binary.build_version()) {
+                if (verbose) {
+                    const auto plat   = to_string(buildver_cmd->platform());
+                    const auto &minos = buildver_cmd->minos();
+                    const auto &sdk   = buildver_cmd->sdk();
+                    fmt::print("[-] Removing old BUILD_VERSION command (platform: '{:s}' version: "
+                               "'{:d}.{:d}.{:d}' SDK: '{:d}.{:d}.{:d}')\n",
+                               plat, minos[0], minos[1], minos[2], sdk[0], sdk[1], sdk[2]);
+                }
+                binary.remove(*buildver_cmd);
+            }
+            const BuildVersion::version_t new_minos{11, 0, 0};
+            const BuildVersion::version_t new_sdk{new_minos};
+            BuildVersion::PLATFORMS new_plat;
+            if (ios) {
+                new_plat = BuildVersion::PLATFORMS::IOS;
+            } else {
+                new_plat = BuildVersion::PLATFORMS::MACOS;
+            }
+            if (verbose) {
+                fmt::print("[-] Adding new BUILD_VERSION command (platform: '{:s}' version: "
+                           "'{:d}.{:d}.{:d}' SDK: '{:d}.{:d}.{:d}')\n",
+                           to_string(new_plat), new_minos[0], new_minos[1], new_minos[2],
+                           new_sdk[0], new_sdk[1], new_sdk[2]);
+            }
+            auto new_buildver_cmd = BuildVersion{new_plat, new_minos, new_sdk, {}};
+            binary.add(new_buildver_cmd);
         }
     }
 

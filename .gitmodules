@@ -1,6 +1,7 @@
 [submodule "cpp/3rdparty/LIEF"]
 	path = cpp/3rdparty/LIEF
-	url = https://github.com/lief-project/LIEF
+	url = https://github.com/jevinskie/LIEF
+	branch = jev/dylibify
 [submodule "cpp/3rdparty/fmt"]
 	path = cpp/3rdparty/fmt
 	url = https://github.com/fmtlib/fmt
