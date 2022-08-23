@@ -26,6 +26,11 @@ static bool dylib_exists(const std::string &dylib_path) {
     }
 }
 
+struct SymInfo {
+    const Symbol *sym;
+    std::string lib;
+};
+
 static bool dylibify(const std::string &in_path, const std::string &out_path,
                      const std::optional<std::string> dylib_path,
                      const std::vector<std::string> remove_dylibs,
@@ -145,7 +150,6 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                            new_sdk[0], new_sdk[1], new_sdk[2]);
             }
             auto new_buildver_cmd = BuildVersion{new_plat, new_minos, new_sdk, {}};
-            new_buildver_cmd.print(std::cout);
             binary.add(new_buildver_cmd);
         }
 
@@ -155,6 +159,14 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                 continue;
             }
             orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
+        }
+
+        std::map<std::string, const SymInfo> orig_syms;
+        for (const auto &sym : binary.imported_symbols()) {
+            if (!sym.has_binding_info() || !sym.binding_info()->has_library()) {
+                continue;
+            }
+            orig_syms.emplace(sym.name(), SymInfo{&sym, sym.binding_info()->library()->name()});
         }
 
         std::set<std::string> remove_dylib_set;
@@ -174,6 +186,17 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                     }
                     remove_dylib_set.emplace(i.first);
                 }
+            }
+        }
+
+        std::set<std::string> remove_sym_set;
+        for (const auto &sym_info : orig_syms) {
+            if (remove_dylib_set.contains(sym_info.second.lib)) {
+                if (verbose) {
+                    fmt::print("[-] Marking symbol '{:s}' from dylib '{:s}' for stubbing\n",
+                               sym_info.first, sym_info.second.lib);
+                }
+                remove_sym_set.emplace(sym_info.first);
             }
         }
 
