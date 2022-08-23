@@ -8,3 +8,6 @@
 [submodule "cpp/3rdparty/argparse"]
 	path = cpp/3rdparty/argparse
 	url = https://github.com/p-ranav/argparse
+[submodule "cpp/3rdparty/cpp-subprocess"]
+	path = cpp/3rdparty/cpp-subprocess
+	url = https://github.com/arun11299/cpp-subprocess

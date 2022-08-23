@@ -1,5 +1,6 @@
 #undef NDEBUG
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
@@ -13,8 +14,10 @@
 #include <LIEF/logging.hpp>
 #include <argparse/argparse.hpp>
 #include <fmt/format.h>
+#include <subprocess.hpp>
 
 namespace fs = std::filesystem;
+using namespace std::string_literals;
 using namespace LIEF::MachO;
 
 static bool dylib_exists(const std::string &dylib_path) {
@@ -26,11 +29,65 @@ static bool dylib_exists(const std::string &dylib_path) {
     }
 }
 
+static void write_string_to_file(const std::string &str, const fs::path file) {
+    auto *fh = fopen(file.c_str(), "w");
+    assert(fh);
+    assert(fwrite(str.c_str(), str.size(), 1, fh) == 1);
+    assert(!fclose(fh));
+}
+
+static std::string create_stub_objc(const std::set<std::string> &stub_syms) {
+    std::string objc = R"objc(
+#undef NDEBUG
+#include <assert.h>
+#import <Foundation/Foundation.h>
+)objc";
+
+    const auto objc_class_prefix = "_OBJC_CLASS_$_"s;
+    const auto plain_prefix      = "_"s;
+
+    for (const auto &sym : stub_syms) {
+        if (sym.starts_with(objc_class_prefix)) {
+            const auto objc_class_name = sym.substr(objc_class_prefix.size());
+            objc += fmt::format(R"objc(
+@interface {:s} : NSObject
+@end
+@implementation {:s}
+@end
+)objc",
+                                objc_class_name, objc_class_name);
+        } else if (sym.starts_with(plain_prefix)) {
+            const auto sym_name = sym.substr(plain_prefix.size());
+            objc += fmt::format(R"objc(
+void {:s}(void) {{
+    assert(!"unimplemented symbols '{:s}'");
+}}
+)objc",
+                                sym_name, sym_name);
+        } else {
+            assert(!"this shouldn't happen");
+        }
+    }
+
+    return objc;
+}
+
+static const std::map<CPU_TYPES, std::string> arch_map{
+    {CPU_TYPES::CPU_TYPE_X86, "i386"},
+    {CPU_TYPES::CPU_TYPE_X86_64, "x86_64"},
+    {CPU_TYPES::CPU_TYPE_ARM, "armv7"},
+    {CPU_TYPES::CPU_TYPE_ARM64, "arm64"},
+};
+
 static std::optional<fs::path> create_thin_stub_dylib(const fs::path &fat_stub_filename,
                                                       const fs::path &out_path,
                                                       const fs::path &stub_dylib_path,
                                                       const std::set<std::string> &stub_syms,
                                                       const CPU_TYPES cpu_type) {
+    const auto objc = create_stub_objc(stub_syms);
+    const auto arch = arch_map.at(cpu_type);
+
+    fmt::print("{:s}\n", objc);
     return "";
 }
 
@@ -265,7 +322,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             }
         }
 
-        if (stub_path != std::nullopt) {
+        if (remove_sym_set.size()) {
             const auto cpu_type = binary.header().cpu_type();
             if (verbose) {
                 fmt::print("[-] Codegening and building stub dylib for arch {:s} '{:s}'\n",

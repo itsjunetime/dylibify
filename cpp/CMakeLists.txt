@@ -36,4 +36,4 @@ set(CMAKE_CXX_STANDARD 20)
 add_subdirectory(3rdparty)
 
 add_executable(dylibify-lief-cpp dylibify-lief-cpp.cpp)
-target_link_libraries(dylibify-lief-cpp argparse fmt LIEF::LIEF)
+target_link_libraries(dylibify-lief-cpp argparse fmt LIEF::LIEF subprocess)
