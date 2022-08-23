@@ -26,10 +26,18 @@ static bool dylib_exists(const std::string &dylib_path) {
     }
 }
 
-struct SymInfo {
-    Symbol *sym;
-    std::string lib;
-};
+static std::optional<fs::path> create_thin_stub_dylib(const fs::path &fat_stub_filename,
+                                                      const fs::path &out_path,
+                                                      const fs::path &stub_dylib_path,
+                                                      const std::set<std::string> &stub_syms,
+                                                      const CPU_TYPES cpu_type) {
+    return "";
+}
+
+static bool create_fat_stub_dylib(const fs::path &fat_stub_filename,
+                                  const std::vector<fs::path> &thin_stubs) {
+    return true;
+}
 
 static bool dylibify(const std::string &in_path, const std::string &out_path,
                      const std::optional<std::string> dylib_path,
@@ -43,6 +51,10 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
     }
 
     auto binaries = Parser::parse(in_path);
+
+    fs::path fat_stub_filename{"dylibify-stubs.dylib"};
+    std::optional<fs::path> stub_path;
+    std::vector<fs::path> thin_stubs;
 
     for (auto &binary : *binaries) {
         std::map<std::string, const DylibCommand *> orig_libraries;
@@ -219,9 +231,8 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             binary.remove(*dylib_cmd);
         }
 
-        std::optional<fs::path> stub_path{std::nullopt};
         if (remove_sym_set.size()) {
-            *stub_path = new_dylib_path.parent_path() / "dylibify-stubs.dylib";
+            *stub_path = new_dylib_path.parent_path() / fat_stub_filename;
             if (verbose) {
                 fmt::print("Creating stub library import '{:s}'\n", stub_path->string());
             }
@@ -252,6 +263,32 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             } else {
                 binding_info.library_ordinal(new_ordinal_map[binding_info.library()->name()]);
             }
+        }
+
+        if (stub_path != std::nullopt) {
+            const auto cpu_type = binary.header().cpu_type();
+            if (verbose) {
+                fmt::print("[-] Codegening and building stub dylib for arch {:s} '{:s}'\n",
+                           to_string(cpu_type), stub_path->string());
+            }
+            const auto thin_stub_path = create_thin_stub_dylib(
+                fat_stub_filename, out_path, *stub_path, remove_sym_set, cpu_type);
+            if (thin_stub_path == std::nullopt) {
+                fmt::print("[!] Error generating stub dylib for arch {:s}!\n", to_string(cpu_type));
+                return false;
+            } else {
+                thin_stubs.emplace_back(*thin_stub_path);
+            }
+        }
+    }
+
+    if (thin_stubs.size()) {
+        if (verbose) {
+            fmt::print("[-] Generating fat stub dylib at '{:s}'\n", fat_stub_filename.string());
+        }
+        if (!create_fat_stub_dylib(fat_stub_filename, thin_stubs)) {
+            fmt::print("[!] Error generating fat stub dylib!\n");
+            return false;
         }
     }
 
