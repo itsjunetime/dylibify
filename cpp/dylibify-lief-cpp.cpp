@@ -62,15 +62,12 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                 std::make_pair(binding_info.library()->name(), binding_info.library_ordinal()));
         }
 
-        std::map<std::string, const SymInfo> orig_syms;
+        std::map<std::string, std::string> orig_syms_to_libs;
         for (auto &sym : binary.symbols()) {
             if (!sym.has_binding_info() || !sym.binding_info()->has_library()) {
                 continue;
             }
-            fmt::print("[-] orig sym '{:s}' ordinal: {:d} lib: '{:s}'\n", sym.name(),
-                       sym.binding_info()->library_ordinal(),
-                       sym.binding_info()->library()->name());
-            orig_syms.emplace(sym.name(), SymInfo{&sym, sym.binding_info()->library()->name()});
+            orig_syms_to_libs.emplace(sym.name(), sym.binding_info()->library()->name());
         }
 
         auto &hdr = binary.header();
@@ -202,21 +199,23 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         }
 
         std::set<std::string> remove_sym_set;
-        for (const auto &sym_info : orig_syms) {
-            if (remove_dylib_set.contains(sym_info.second.lib)) {
+        for (const auto &sym_map : orig_syms_to_libs) {
+            if (remove_dylib_set.contains(sym_map.second)) {
                 if (verbose) {
                     fmt::print("[-] Marking symbol '{:s}' from dylib '{:s}' for stubbing\n",
-                               sym_info.first, sym_info.second.lib);
+                               sym_map.first, sym_map.second);
                 }
-                remove_sym_set.emplace(sym_info.first);
+                remove_sym_set.emplace(sym_map.first);
             }
         }
 
+        std::set<int32_t> removed_ordinals;
         for (const auto &dylib : remove_dylib_set) {
             const auto *dylib_cmd = orig_libraries[dylib];
             if (verbose) {
                 fmt::print("[-] Removing dependant dylib '{:s}'\n", dylib);
             }
+            removed_ordinals.emplace(orig_ordinal_map[dylib_cmd->name()]);
             binary.remove(*dylib_cmd);
         }
 
@@ -224,7 +223,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         if (remove_sym_set.size()) {
             *stub_path = new_dylib_path.parent_path() / "dylibify-stubs.dylib";
             if (verbose) {
-                fmt::print("Creating stub library 'dylibify-stubs.dylib'\n");
+                fmt::print("Creating stub library import '{:s}'\n", stub_path->string());
             }
             const auto stub_dylib_cmd =
                 DylibCommand::load_dylib(*stub_path, 2, 0x00010000, 0x00010000);
@@ -232,28 +231,26 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         }
 
         std::map<std::string, int32_t> new_ordinal_map;
-        int32_t i{1};
+        int32_t new_ordinal_idx{1};
         for (const auto &dylib_cmd : binary.libraries()) {
             if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
                 continue;
             }
-            new_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), i));
-            fmt::print("[-] library {:d} '{:s}'\n", i, dylib_cmd.name());
-            ++i;
+            new_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), new_ordinal_idx));
+            ++new_ordinal_idx;
         }
 
+        if (verbose) {
+            fmt::print("[-] Updating library ordinals\n");
+        }
         for (auto &binding_info : binary.dyld_info()->bindings()) {
             if (!binding_info.has_library()) {
                 continue;
             }
-            binding_info.library_ordinal(new_ordinal_map[binding_info.library()->name()]);
-        }
-
-        for (const auto &sym_it : orig_syms) {
-            const auto &sym_name = sym_it.first;
-            const auto &sym_info = sym_it.second;
-            if (remove_sym_set.contains(sym_name)) {
-                sym_info.sym->binding_info()->library_ordinal(new_ordinal_map[*stub_path]);
+            if (removed_ordinals.contains(binding_info.library_ordinal())) {
+                binding_info.library_ordinal(new_ordinal_map[*stub_path]);
+            } else {
+                binding_info.library_ordinal(new_ordinal_map[binding_info.library()->name()]);
             }
         }
     }
