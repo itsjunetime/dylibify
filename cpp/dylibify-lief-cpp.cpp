@@ -35,9 +35,9 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
         LIEF::logging::set_level(LIEF::logging::LOGGING_LEVEL::LOG_TRACE);
     }
 
-    std::unique_ptr<FatBinary> binaries = Parser::parse(in_path);
+    auto binaries = Parser::parse(in_path);
 
-    for (Binary &binary : *binaries) {
+    for (auto &binary : *binaries) {
         auto &hdr = binary.header();
         assert(hdr.file_type() == FILE_TYPES::MH_EXECUTE);
         if (verbose) {
@@ -58,7 +58,7 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
 
         if (const auto *pgz_seg = binary.get_segment("__PAGEZERO")) {
             if (verbose) {
-                fmt::print("[-] Remvoing __PAGEZERO segment\n");
+                fmt::print("[-] Removing __PAGEZERO segment\n");
             }
             binary.remove(*pgz_seg);
         }
