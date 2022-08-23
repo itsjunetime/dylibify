@@ -86,14 +86,23 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
         }
 
         if (const auto *dylinker_cmd = binary.dylinker()) {
+            if (verbose) {
+                fmt::print("[-] Removing dynlinker command\n");
+            }
             binary.remove(*dylinker_cmd);
         }
 
         if (const auto *main_cmd = binary.main_command()) {
+            if (verbose) {
+                fmt::print("[-] Removing MAIN command\n");
+            }
             binary.remove(*main_cmd);
         }
 
         if (const auto *src_cmd = binary.source_version()) {
+            if (verbose) {
+                fmt::print("[-] Remvoing source version command\n");
+            }
             binary.remove(*src_cmd);
         }
 
