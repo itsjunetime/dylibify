@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -119,7 +120,7 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
             }
             if (const auto *buildver_cmd = binary.build_version()) {
                 if (verbose) {
-                    const auto plat   = to_string(buildver_cmd->platform());
+                    const auto *plat  = to_string(buildver_cmd->platform());
                     const auto &minos = buildver_cmd->minos();
                     const auto &sdk   = buildver_cmd->sdk();
                     fmt::print("[-] Removing old BUILD_VERSION command (platform: '{:s}' version: "
@@ -143,7 +144,31 @@ static void dylibify(const std::string &in_path, const std::string &out_path,
                            new_sdk[0], new_sdk[1], new_sdk[2]);
             }
             auto new_buildver_cmd = BuildVersion{new_plat, new_minos, new_sdk, {}};
+            new_buildver_cmd.print(std::cout);
             binary.add(new_buildver_cmd);
+        }
+
+        std::set<std::string> remove_dylib_set{remove_dylibs.cbegin(), remove_dylibs.cend()};
+
+        if (auto_remove_dylibs) {
+            for (const auto &dylib_cmd : binary.libraries()) {
+                if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+                    continue;
+                }
+                const auto &test_dylib_path = dylib_cmd.name();
+                if (!dylib_exists(test_dylib_path)) {
+                    if (verbose) {
+                        fmt::print("[-] Marking unavailable dylib '{:s}' for removal\n",
+                                   test_dylib_path);
+                    }
+                    remove_dylib_set.emplace(test_dylib_path);
+                }
+            }
+        }
+
+        if (verbose && remove_dylib_set.size()) {
+            fmt::print("[-] Dependant dylib removal list: '{:s}'\n",
+                       fmt::join(remove_dylib_set, "', '"));
         }
     }
 
