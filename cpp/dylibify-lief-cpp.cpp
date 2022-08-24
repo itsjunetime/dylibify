@@ -20,6 +20,14 @@ namespace fs = std::filesystem;
 using namespace std::string_literals;
 using namespace LIEF::MachO;
 
+static uint8_t get_library_ordinal(uint16_t n_desc) {
+    return n_desc >> 8;
+}
+
+static void set_library_ordinal(uint16_t &n_desc, uint8_t ordinal) {
+    n_desc = (n_desc & 0x00FF) | (ordinal << 8);
+}
+
 static bool dylib_exists(const std::string &dylib_path) {
     if (auto *handle = dlopen(dylib_path.c_str(), RTLD_LAZY | RTLD_LOCAL)) {
         dlclose(handle);
@@ -168,12 +176,13 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         }
 
         std::map<std::string, int32_t> orig_ordinal_map;
-        for (const auto &binding_info : binary.dyld_info()->bindings()) {
-            if (!binding_info.has_library()) {
+        int32_t orig_ordinal_idx{1};
+        for (const auto &dylib_cmd : binary.libraries()) {
+            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
                 continue;
             }
-            orig_ordinal_map.emplace(
-                std::make_pair(binding_info.library()->name(), binding_info.library_ordinal()));
+            orig_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), orig_ordinal_idx));
+            ++orig_ordinal_idx;
         }
 
         std::map<std::string, std::string> orig_syms_to_libs;
@@ -353,18 +362,45 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             ++new_ordinal_idx;
         }
 
+        std::map<int32_t, int32_t> orig_to_new_ordinal_map;
+        for (const auto &old_it : orig_ordinal_map) {
+            const auto &orig_lib = old_it.first;
+            const auto orig_ord  = old_it.second;
+            if (new_ordinal_map.contains(orig_lib)) {
+                orig_to_new_ordinal_map.emplace(
+                    std::make_pair(orig_ord, new_ordinal_map[orig_lib]));
+            } else {
+                assert(remove_dylib_set.contains(orig_lib));
+                orig_to_new_ordinal_map.emplace(
+                    std::make_pair(orig_ord, new_ordinal_map[*stub_path]));
+            }
+        }
+
         if (verbose) {
-            fmt::print("[-] Updating library ordinals\n");
+            fmt::print("[-] Updating library ordinals in binding info\n");
         }
         for (auto &binding_info : binary.dyld_info()->bindings()) {
-            if (!binding_info.has_library()) {
+            binding_info.library_ordinal(
+                orig_to_new_ordinal_map.at(binding_info.library_ordinal()));
+        }
+
+        if (verbose) {
+            fmt::print("[-] Updating library ordinals in symtab\n");
+        }
+        for (auto &sym : binary.symbols()) {
+            if (sym.origin() != SYMBOL_ORIGINS::SYM_ORIGIN_LC_SYMTAB) {
                 continue;
             }
-            if (removed_ordinals.contains(binding_info.library_ordinal())) {
-                binding_info.library_ordinal(new_ordinal_map[*stub_path]);
-            } else {
-                binding_info.library_ordinal(new_ordinal_map[binding_info.library()->name()]);
+            const auto orig_ord = get_library_ordinal(sym.description());
+            if (orig_ord == (uint8_t)SYMBOL_DESCRIPTIONS::SELF_LIBRARY_ORDINAL ||
+                orig_ord == (uint8_t)SYMBOL_DESCRIPTIONS::DYNAMIC_LOOKUP_ORDINAL ||
+                orig_ord == (uint8_t)SYMBOL_DESCRIPTIONS::EXECUTABLE_ORDINAL) {
+                continue;
             }
+            const auto new_ord = orig_to_new_ordinal_map.at(orig_ord);
+            auto new_desc      = sym.description();
+            set_library_ordinal(new_desc, new_ord);
+            sym.description(new_desc);
         }
 
         if (remove_sym_set.size()) {
