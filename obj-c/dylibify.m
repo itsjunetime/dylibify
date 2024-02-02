@@ -1,11 +1,3 @@
-//
-//  main.m
-//  dylibify
-//
-//  Created by Jake James on 7/13/18.
-//  Copyright © 2018 Jake James. All rights reserved.
-//
-// clang -o dylibify dylibify.m -framework Foundation -fobjc-arc
 
 #import <Foundation/Foundation.h>
 
@@ -360,34 +352,39 @@ void patch_dyldinfo(FILE *file, off_t offset, struct dyld_info_command *dyldinfo
     }
 }
 
-int dylibify(NSDictionary *args) {
-    NSError *error             = nil;
+#define ERR(...) err_impl([NSString stringWithFormat:__VA_ARGS__])
+
+NSError *err_impl(NSString *err_str) {
+    NSLog(@"dylibify err: %@", err_str);
+    return [NSError errorWithDomain:@"dylibify" code:1 userInfo:@{@"Error reason": err_str}];
+}
+
+void dylibify(
+    NSString * __nonnull in,
+    NSString * __nonnull out,
+    NSError * __nullable * __nullable error
+) {
     NSFileManager *fileManager = [NSFileManager defaultManager];
 
     //----Make sure we don't overwrite any file----//
-    if ([fileManager fileExistsAtPath:args[@"out"]]) {
-        if (true) {
-            if (![fileManager removeItemAtPath:args[@"out"] error:&error] || error) {
-                printf("[!] %s\n", [[error localizedDescription] UTF8String]);
-                return -1;
-            }
-        } else {
-            printf("[!] %s file exists!\n", [args[@"out"] UTF8String]);
-            return -1;
+    if ([fileManager fileExistsAtPath:out]) {
+        if (![fileManager removeItemAtPath:out error:error] || *error) {
+            *error = ERR(@"Couldn't remove current outfile: %@", *error);
+            return;
         }
     }
 
     //----Create a copy of the file on the target destination----//
-    [fileManager copyItemAtPath:args[@"in"] toPath:args[@"out"] error:&error];
+    [fileManager copyItemAtPath:in toPath:out error:error];
 
     //----Handle errors----//
-    if (error) {
-        printf("[!] %s\n", [[error localizedDescription] UTF8String]);
-        return -1;
+    if (*error) {
+        *error = ERR(@"Couldn't copy infile to outfile path: %@", *error);
+        return;
     }
 
     //----Open the copied file for updating, in binary mode----//
-    FILE *file = fopen([args[@"out"] UTF8String], "r+b");
+    FILE *file = fopen(out.UTF8String, "r+b");
 
     //----This variable will hold the binary location as we move on through reading it----//
     size_t offset            = 0;
@@ -427,7 +424,7 @@ int dylibify(NSDictionary *args) {
                 // command----//
                 if (!strcmp(seg64->segname, "__PAGEZERO")) {
                     patch_pagezero(file, offset, cmd, copied, seg64,
-                                   sizeof(struct segment_command_64), [args[@"out"] UTF8String]);
+                                   sizeof(struct segment_command_64), out.UTF8String);
                 }
                 free(seg64);
             } else if (cmd->cmd == LC_DYLD_INFO_ONLY) {
@@ -481,7 +478,7 @@ int dylibify(NSDictionary *args) {
 
                 if (!strcmp(seg->segname, "__PAGEZERO")) {
                     patch_pagezero(file, offset, cmd, copied, seg, sizeof(struct segment_command),
-                                   [args[@"out"] UTF8String]);
+                                   out.UTF8String);
                 }
 
                 free(seg);
@@ -537,7 +534,7 @@ int dylibify(NSDictionary *args) {
                         if (!strcmp(seg64->segname, "__PAGEZERO")) {
                             patch_pagezero(file, offset, cmd, copied, seg64,
                                            sizeof(struct segment_command_64),
-                                           [args[@"out"] UTF8String]);
+                                           out.UTF8String);
                             copied = true;
                         }
                         free(seg64);
@@ -585,7 +582,7 @@ int dylibify(NSDictionary *args) {
                         if (!strcmp(seg->segname, "__PAGEZERO")) {
                             patch_pagezero(file, offset, cmd, copied, seg,
                                            sizeof(struct segment_command),
-                                           [args[@"out"] UTF8String]);
+                                           out.UTF8String);
                             copied = true;
                         }
                         free(seg);
@@ -612,26 +609,9 @@ int dylibify(NSDictionary *args) {
         free(fat);
         free(arch);
     } else {
-        printf("[!] Unrecognized file\n");
-        goto err;
+        *error = ERR(@"Unrecognized file magic %x", *magic);
     }
 
-err:
     fclose(file);
-    return -1;
-}
-
-int main(int argc, const char **argv) {
-    NSDictionary *args =
-        [[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain];
-    NSLog(@"args: %@", args);
-    if (!args[@"in"] || !args[@"out"]) {
-        printf("Usage:\n\t%s -in <in> -out <out>\nExample:\n\t%s -in /usr/bin/executable -out "
-               "/usr/lib/dylibified.dylib\n",
-               argv[0], argv[0]);
-        return -1;
-    }
-
-    dylibify(args);
-    return 0;
+    return;
 }
