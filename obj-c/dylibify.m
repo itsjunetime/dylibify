@@ -1,4 +1,3 @@
-
 #import <Foundation/Foundation.h>
 
 #import <mach-o/loader.h>
@@ -249,7 +248,7 @@ void bindit(uint8_t *map, size_t sz) {
     uint8_t *p     = start;
 
     while (!done && (p < end)) {
-        uint8_t immediate = *p & BIND_IMMEDIATE_MASK;
+        // uint8_t immediate = *p & BIND_IMMEDIATE_MASK;
         uint8_t opcode    = *p & BIND_OPCODE_MASK;
         ++p;
         switch (opcode) {
