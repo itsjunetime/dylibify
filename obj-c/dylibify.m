@@ -57,7 +57,7 @@ void patch_buildver(FILE *obj_file, off_t offset, struct build_version_command *
     printf("[-] MINOS was: 0x%x\n", buildver->minos);
     printf("[-] SDK was: 0x%x\n", buildver->sdk);
 
-    buildver->platform = PLATFORM_MACOS;
+    buildver->platform = PLATFORM_IOS;
     buildver->minos    = 0x000b0000;
     buildver->sdk      = 0x000b0000;
 
@@ -79,7 +79,7 @@ void patch_minver(FILE *obj_file, off_t offset, struct version_min_command *minv
     buildver->cmd                          = LC_BUILD_VERSION;
     // overwrite following LC_SOURCE_VERSION
     buildver->cmdsize  = 32;
-    buildver->platform = PLATFORM_MACOS;
+    buildver->platform = PLATFORM_IOS;
     buildver->minos    = 0x000b0000;
     buildver->sdk      = 0x000b0000;
     buildver->ntools   = 1;
